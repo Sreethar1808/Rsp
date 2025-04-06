@@ -1,0 +1,150 @@
+package com.example.DemoProject.RSProject.practice;
+
+import org.apache.poi.ss.usermodel.*;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+import org.springframework.stereotype.Service;
+
+import jakarta.transaction.Transactional;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.time.LocalDateTime;
+import java.util.*;
+
+@Service
+public class VerifyExcelService {
+
+    private final ExcelValidationRepository repository;
+
+    public VerifyExcelService(ExcelValidationRepository repository) {
+        this.repository = repository;
+    }
+
+    public UUID validateExcel(InputStream inputStream, String fileName) throws IOException {
+        List<String[]> validData = new ArrayList<>();
+        List<String[]> invalidData = new ArrayList<>();
+        List<String> expectedHeaders = List.of("Customer ID", "Name", "Phone Number", "DOB");
+
+        Workbook workbook = new XSSFWorkbook(inputStream);
+        Sheet sheet = workbook.getSheetAt(0);
+
+        // ✅ Validate headers
+        Row headerRow = sheet.getRow(0);
+        if (!validateHeaders(headerRow, expectedHeaders)) {
+            workbook.close();
+            throw new IllegalArgumentException("Excel headers are invalid. Expected headers: " + expectedHeaders);
+        }
+
+        // ✅ Process rows
+        for (int i = 1; i <= sheet.getLastRowNum(); i++) {
+            Row row = sheet.getRow(i);
+            if (row == null) continue;
+
+            String customerId = getCellValue(row.getCell(0));
+            String name = getCellValue(row.getCell(1));
+            String phoneNumber = getCellValue(row.getCell(2));
+            String dob = getCellValue(row.getCell(3));
+
+            List<String> issues = new ArrayList<>();
+
+            if (name == null || name.trim().isEmpty() || !name.matches("^[a-zA-Z ]+$")) {
+                issues.add("Invalid Name");
+            }
+
+            if (phoneNumber == null || !phoneNumber.matches("^\\d{10}$")) {
+                issues.add("Invalid Phone Number");
+            }
+
+            if (dob == null || dob.trim().isEmpty()) {
+                issues.add("Date of Birth Missing");
+            }
+
+            if (issues.isEmpty()) {
+                validData.add(new String[]{customerId, name, phoneNumber, dob});
+            } else {
+                invalidData.add(new String[]{customerId, name, phoneNumber, dob, String.join(", ", issues)});
+            }
+        }
+
+        workbook.close();
+
+        // ✅ Prepare headers for export
+        String[] validHeaders = expectedHeaders.toArray(new String[0]);
+        List<String> invalidHeaderList = new ArrayList<>(expectedHeaders);
+        invalidHeaderList.add("Status Description");
+        String[] invalidHeaders = invalidHeaderList.toArray(new String[0]);
+
+        byte[] validExcel = createExcel(validData, validHeaders);
+        byte[] invalidExcel = createExcel(invalidData, invalidHeaders);
+
+        // ✅ Save validation result
+        UUID id = UUID.randomUUID();
+        ExcelValidationResult validationResult = new ExcelValidationResult(
+                id, fileName, LocalDateTime.now(),
+                validData.size() + invalidData.size(),
+                validData.size(),
+                invalidData.size(),
+                validExcel,
+                invalidExcel
+        );
+
+        ExcelValidationResult savedResult = saveValidationResult(validationResult);
+        return id;
+    }
+
+    private boolean validateHeaders(Row headerRow, List<String> expectedHeaders) {
+        if (headerRow == null || headerRow.getPhysicalNumberOfCells() != expectedHeaders.size()) {
+            return false;
+        }
+
+        for (int i = 0; i < expectedHeaders.size(); i++) {
+            String cellValue = getCellValue(headerRow.getCell(i));
+            if (cellValue == null || !cellValue.equalsIgnoreCase(expectedHeaders.get(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    @Transactional
+    public ExcelValidationResult saveValidationResult(ExcelValidationResult validationResult) {
+        return repository.save(validationResult);
+    }
+
+    private String getCellValue(Cell cell) {
+        if (cell == null) return null;
+        return switch (cell.getCellType()) {
+            case STRING -> cell.getStringCellValue().trim();
+            case NUMERIC -> DateUtil.isCellDateFormatted(cell) ?
+                    cell.getDateCellValue().toString() : String.valueOf((long) cell.getNumericCellValue());
+            case BOOLEAN -> String.valueOf(cell.getBooleanCellValue());
+            default -> null;
+        };
+    }
+
+    private byte[] createExcel(List<String[]> data, String[] headers) throws IOException {
+        Workbook workbook = new XSSFWorkbook();
+        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+        Sheet sheet = workbook.createSheet("Sheet1");
+
+        // Write headers
+        Row headerRow = sheet.createRow(0);
+        for (int i = 0; i < headers.length; i++) {
+            headerRow.createCell(i).setCellValue(headers[i]);
+        }
+
+        // Write data rows
+        int rowNum = 1;
+        for (String[] rowData : data) {
+            Row row = sheet.createRow(rowNum++);
+            for (int i = 0; i < rowData.length; i++) {
+                row.createCell(i).setCellValue(rowData[i]);
+            }
+        }
+
+        workbook.write(outputStream);
+        workbook.close();
+        return outputStream.toByteArray();
+    }
+}
